@@ -1,7 +1,12 @@
 # 网关Http服务器配置
 [HTTPWEBSERVER]
+# Web对外服务端口
 address = "0.0.0.0"
 port = 8080
+# 内部管理服务端口
+manage-address = "0.0.0.0"
+manage-port = 8090
+# 其它Http服务配置
 body-limit = "100K"
 #tls-cret-file = ""
 #tls-key-file = ""

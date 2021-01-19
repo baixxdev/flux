@@ -79,6 +79,12 @@ const (
 const (
 	EndpointAttrTagNotDefined = iota
 	EndpointAttrTagAuthorize
+	EndpointAttrTagManaged
+)
+
+const (
+	EndpointAttrNameAuthorize = "Authorize"
+	EndpointAttrNameManaged   = "Managed"
 )
 
 type (
@@ -118,6 +124,10 @@ func (a Attribute) ValueInt() int {
 
 func (a Attribute) ValueBool() bool {
 	return cast.ToBool(a.Value)
+}
+
+func (a Attribute) IsValid() bool {
+	return a.Tag > 0 && "" != a.Name
 }
 
 // EmbeddedAttributes

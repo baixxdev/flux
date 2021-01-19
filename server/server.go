@@ -10,7 +10,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cast"
 	"net/http"
-	_ "net/http/pprof"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -36,6 +35,8 @@ const (
 	HttpWebServerConfigKeyPort               = "port"
 	HttpWebServerConfigKeyTlsCertFile        = "tls-cert-file"
 	HttpWebServerConfigKeyTlsKeyFile         = "tls-key-file"
+	HttpWebServerConfigKeyManageAddress      = "manage-address"
+	HttpWebServerConfigKeyManagePort         = "manage-port"
 )
 
 type (
@@ -47,21 +48,22 @@ type (
 
 // ServeEngine
 type HttpServeEngine struct {
-	httpWebServer  flux.WebServer
-	responseWriter flux.ServerResponseWriter
-	errorsWriter   flux.ServerErrorsWriter
-	ctxHooks       []flux.ServerContextHookFunc
-	interceptors   []flux.WebInterceptor
-	debugServer    *http.Server
-	config         *flux.Configuration
-	defaults       map[string]interface{}
-	router         *Router
-	registry       flux.EndpointRegistry
-	versionLookup  VersionLookupFunc
-	ctxPool        sync.Pool
-	started        chan struct{}
-	stopped        chan struct{}
-	banner         string
+	httpWebServer   flux.WebServer
+	manageWebServer flux.WebServer
+	responseWriter  flux.ServerResponseWriter
+	errorsWriter    flux.ServerErrorsWriter
+	ctxHooks        []flux.ServerContextHookFunc
+	interceptors    []flux.WebInterceptor
+	debugServer     *http.Server
+	config          *flux.Configuration
+	defaults        map[string]interface{}
+	router          *Router
+	registry        flux.EndpointRegistry
+	versionLookup   VersionLookupFunc
+	ctxPool         sync.Pool
+	started         chan struct{}
+	stopped         chan struct{}
+	banner          string
 }
 
 // WithServerResponseWriter 用于配置Web服务响应数据输出函数
@@ -177,15 +179,13 @@ func (s *HttpServeEngine) Initial() error {
 	// 默认必备的WebServer功能
 	s.httpWebServer.SetWebErrorHandler(s.defaultServerErrorHandler)
 	s.httpWebServer.SetWebNotFoundHandler(s.defaultNotFoundErrorHandler)
+	// Manage web server
+	s.manageWebServer = ext.LoadWebServerFactory()(s.config)
+	s.manageWebServer.SetWebErrorHandler(s.defaultServerErrorHandler)
+	s.manageWebServer.SetWebNotFoundHandler(s.defaultNotFoundErrorHandler)
 	// 第一优先级的拦截器
 	for _, wi := range s.interceptors {
 		s.AddWebInterceptor(wi)
-	}
-	// Internal Web Server
-	port := s.config.GetInt(HttpWebServerConfigKeyFeatureDebugPort)
-	s.debugServer = &http.Server{
-		Handler: http.DefaultServeMux,
-		Addr:    fmt.Sprintf("0.0.0.0:%d", port),
 	}
 	// Endpoint registry
 	if registry, config, err := activeEndpointRegistry(); nil != err {
@@ -196,12 +196,6 @@ func (s *HttpServeEngine) Initial() error {
 		}
 		s.registry = registry
 	}
-	// - Debug特性支持：默认关闭，需要配置开启
-	if s.config.GetBool(HttpWebServerConfigKeyFeatureDebugEnable) {
-		http.DefaultServeMux.Handle("/debug/endpoints", NewDebugQueryEndpointHandler())
-		http.DefaultServeMux.Handle("/debug/services", NewDebugQueryServiceHandler())
-		http.DefaultServeMux.Handle("/debug/metrics", promhttp.Handler())
-	}
 	// Echo feature
 	if s.config.GetBool(HttpWebServerConfigKeyFeatureEchoEnable) {
 		logger.Info("EchoEndpoint register")
@@ -209,6 +203,10 @@ func (s *HttpServeEngine) Initial() error {
 			s.HandleHttpEndpointEvent(evt)
 		}
 	}
+	// 管理功能
+	s.manageWebServer.AddWebHttpHandler("GET", "/debug/endpoints", NewDebugQueryEndpointHandler())
+	s.manageWebServer.AddWebHttpHandler("GET", "/debug/services", NewDebugQueryServiceHandler())
+	s.manageWebServer.AddWebHttpHandler("GET", "/debug/metrics", promhttp.Handler())
 	return s.router.Initial()
 }
 
@@ -251,25 +249,46 @@ func (s *HttpServeEngine) StartServe(info flux.BuildInfo, config *flux.Configura
 		logger.Info(s.banner)
 	}
 	logger.Infof(VersionFormat, info.CommitId, info.Version, info.Date)
-	// Start Servers
-	if s.debugServer != nil {
-		go func() {
-			logger.Infow("DebugServer starting", "address", s.debugServer.Addr)
-			_ = s.debugServer.ListenAndServe()
-		}()
+	startServer := func(server flux.WebServer, name, address string, port int, tlscert, tlskey string) error {
+		addr := fmt.Sprintf("%s:%d", address, port)
+		logger.Infow(name+" starting", "address", address, "cert", tlscert, "key", tlskey)
+		err := server.StartTLS(addr, tlscert, tlskey)
+		if nil != err {
+			logger.Errorw(name+" start failed", "error", err)
+		}
+		return err
 	}
-	address := fmt.Sprintf("%s:%d",
-		config.GetString(HttpWebServerConfigKeyAddress), config.GetInt(HttpWebServerConfigKeyPort))
-	keyFile := config.GetString(HttpWebServerConfigKeyTlsKeyFile)
-	certFile := config.GetString(HttpWebServerConfigKeyTlsCertFile)
-	logger.Infow("HttpServeEngine starting", "address", address, "cert", certFile, "key", keyFile)
-	return s.httpWebServer.StartTLS(address, certFile, keyFile)
+	// Start Servers
+	go startServer(s.manageWebServer, "Manage web server",
+		s.config.GetString(HttpWebServerConfigKeyManageAddress), s.config.GetInt(HttpWebServerConfigKeyManagePort),
+		"", "",
+	)
+	tlsKeyFile := config.GetString(HttpWebServerConfigKeyTlsKeyFile)
+	tlsCertFile := config.GetString(HttpWebServerConfigKeyTlsCertFile)
+	return startServer(s.httpWebServer, "Http web server",
+		config.GetString(HttpWebServerConfigKeyAddress), config.GetInt(HttpWebServerConfigKeyManagePort),
+		tlsCertFile, tlsKeyFile,
+	)
 }
 
-func (s *HttpServeEngine) HandleEndpointRequest(webc flux.WebContext, endpoints *MultiEndpoint, tracing bool) error {
+func (s *HttpServeEngine) HandleMultiEndpointRequest(webc flux.WebContext, endpoints *MultiEndpoint, tracing bool) error {
 	version := s.versionLookup(webc)
 	endpoint, found := endpoints.FindByVersion(version)
 	requestId := cast.ToString(webc.GetValue(flux.HeaderXRequestId))
+	if found {
+		return s.HandleEndpointRequest(webc, requestId, endpoint)
+	}
+	if tracing {
+		url, _ := webc.RequestURL()
+		logger.Trace(requestId).Infow("HttpServeEngine route not-found",
+			"http-pattern", []string{webc.Method(), webc.RequestURI(), url.Path},
+			"http-version", version,
+		)
+	}
+	return flux.ErrRouteNotFound
+}
+
+func (s *HttpServeEngine) HandleEndpointRequest(webc flux.WebContext, requestId string, endpoint *flux.Endpoint) error {
 	defer func() {
 		if r := recover(); r != nil {
 			trace := logger.Trace(requestId)
@@ -281,15 +300,6 @@ func (s *HttpServeEngine) HandleEndpointRequest(webc flux.WebContext, endpoints 
 			trace.Error(string(debug.Stack()))
 		}
 	}()
-	if !found {
-		if tracing {
-			url, _ := webc.RequestURL()
-			logger.Trace(requestId).Infow("HttpServeEngine route not-found",
-				"http-pattern", []string{webc.Method(), webc.RequestURI(), url.Path},
-			)
-		}
-		return flux.ErrRouteNotFound
-	}
 	ctxw := s.acquireContext(requestId, webc, endpoint)
 	defer s.releaseContext(ctxw)
 	// Route call
@@ -353,26 +363,51 @@ func (s *HttpServeEngine) HandleHttpEndpointEvent(event flux.HttpEndpointEvent) 
 		return
 	}
 	pattern := event.Endpoint.HttpPattern
-	routeKey := fmt.Sprintf("%s#%s", method, pattern)
 	// Refresh endpoint
 	endpoint := event.Endpoint
 	initArguments(endpoint.Service.Arguments)
 	initArguments(endpoint.Permission.Arguments)
-	bind, isreg := s.selectMultiEndpoint(routeKey, &endpoint)
-	switch event.EventType {
+	if endpoint.AttrByTag(flux.EndpointAttrTagManaged).IsValid() {
+		s.registerManageEndpoint(method, pattern, event.EventType, &endpoint)
+	} else {
+		routeKey := fmt.Sprintf("%s#%s", method, pattern)
+		s.registerServeEndpoint(routeKey, method, pattern, event.EventType, &endpoint)
+	}
+}
+
+// 内部管理接口，不支持多版本
+func (s *HttpServeEngine) registerManageEndpoint(method, pattern string, event flux.EventType, endpoint *flux.Endpoint) {
+	logger.Infow("Register managed http handler", "method", method, "pattern", pattern)
+	switch event {
+	case flux.EventTypeAdded, flux.EventTypeUpdated:
+		s.manageWebServer.AddWebHandler(method, pattern, func(webc flux.WebContext) error {
+			requestId := cast.ToString(webc.GetValue(flux.HeaderXRequestId))
+			return s.HandleEndpointRequest(webc, requestId, endpoint)
+		})
+	case flux.EventTypeRemoved:
+		// TODO WebServer需要支持移除Handler实现
+	}
+	return
+}
+
+// 对外服务端口支持多版本
+func (s *HttpServeEngine) registerServeEndpoint(routeKey string, method, pattern string, event flux.EventType, endpoint *flux.Endpoint) {
+	multi, toRegister := s.selectMultiEndpoint(routeKey, endpoint)
+	switch event {
 	case flux.EventTypeAdded:
 		logger.Infow("New endpoint", "version", endpoint.Version, "method", method, "pattern", pattern)
-		bind.Update(endpoint.Version, &endpoint)
-		if isreg {
+		multi.Update(endpoint.Version, endpoint)
+		if toRegister {
 			logger.Infow("Register http handler", "method", method, "pattern", pattern)
-			s.httpWebServer.AddWebHandler(method, pattern, s.newWrappedEndpointHandler(bind))
+			s.httpWebServer.AddWebHandler(method, pattern, s.newWrappedEndpointHandler(multi))
 		}
 	case flux.EventTypeUpdated:
 		logger.Infow("Update endpoint", "version", endpoint.Version, "method", method, "pattern", pattern)
-		bind.Update(endpoint.Version, &endpoint)
+		multi.Update(endpoint.Version, endpoint)
 	case flux.EventTypeRemoved:
 		logger.Infow("Delete endpoint", "method", method, "pattern", pattern)
-		bind.Delete(endpoint.Version)
+		multi.Delete(endpoint.Version)
+		// TODO WebServer需要支持移除Handler实现
 	}
 }
 
@@ -380,9 +415,7 @@ func (s *HttpServeEngine) HandleHttpEndpointEvent(event flux.HttpEndpointEvent) 
 func (s *HttpServeEngine) Shutdown(ctx context.Context) error {
 	logger.Info("HttpServeEngine shutdown...")
 	defer close(s.stopped)
-	if s.debugServer != nil {
-		_ = s.debugServer.Close()
-	}
+	_ = s.manageWebServer.Shutdown(ctx)
 	if err := s.httpWebServer.Shutdown(ctx); nil != err {
 		logger.Warnw("HttpServeEngine shutdown http server", "error", err)
 	}
@@ -429,9 +462,9 @@ func (s *HttpServeEngine) WebServer() flux.WebServer {
 	return s.ensure().httpWebServer
 }
 
-// DebugServer 返回DebugServer实例，以及实体是否有效
-func (s *HttpServeEngine) DebugServer() (*http.Server, bool) {
-	return s.debugServer, nil != s.debugServer
+// ManageWebServer 返回管理端的WebServer实例，以及实例是否有效
+func (s *HttpServeEngine) ManageWebServer() flux.WebServer {
+	return s.manageWebServer
 }
 
 // AddServerContextHookFunc 添加Http与Flux的Context桥接函数
@@ -442,7 +475,7 @@ func (s *HttpServeEngine) AddServerContextHookFunc(f flux.ServerContextHookFunc)
 func (s *HttpServeEngine) newWrappedEndpointHandler(endpoint *MultiEndpoint) flux.WebHandler {
 	enabled := s.config.GetBool(HttpWebServerConfigKeyRequestLogEnable)
 	return func(webc flux.WebContext) error {
-		return s.HandleEndpointRequest(webc, endpoint, enabled)
+		return s.HandleMultiEndpointRequest(webc, endpoint, enabled)
 	}
 }
 
