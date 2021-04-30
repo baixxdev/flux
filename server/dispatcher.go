@@ -13,13 +13,13 @@ import (
 )
 
 type Dispatcher struct {
-	metrics *Metrics
+	metrics *EndpointMetrics
 	hooks   []flux.PrepareHookFunc
 }
 
 func NewDispatcher() *Dispatcher {
 	return &Dispatcher{
-		metrics: NewMetrics(),
+		metrics: NewEndpointMetrics(),
 		hooks:   make([]flux.PrepareHookFunc, 0, 4),
 	}
 }
@@ -108,15 +108,11 @@ func (r *Dispatcher) Shutdown(ctx context.Context) error {
 }
 
 func (r *Dispatcher) Route(ctx *flux.Context) *flux.ServeError {
-	// 统计异常
-	doMetricEndpointFunc := func(err *flux.ServeError) *flux.ServeError {
-		// Access Counter: ProtoName, Interface, Method
-		service := ctx.Service()
-		proto, uri, method := service.RpcProto(), service.Interface, service.Method
-		r.metrics.EndpointAccess.WithLabelValues(proto, uri, method).Inc()
+	doMetric := func(err *flux.ServeError) *flux.ServeError {
 		if nil != err {
+			service := ctx.Service()
 			// Error Counter: ProtoName, Interface, Method, ErrorCode
-			r.metrics.EndpointError.WithLabelValues(proto, uri, method, err.GetErrorCode()).Inc()
+			r.metrics.ErrorCounter.WithLabelValues(service.RpcProto(), service.Interface, service.Method, err.GetErrorCode()).Inc()
 		}
 		return err
 	}
@@ -124,6 +120,8 @@ func (r *Dispatcher) Route(ctx *flux.Context) *flux.ServeError {
 	defer func() {
 		ctx.AddMetric("route", time.Since(ctx.StartAt()))
 	}()
+	// Access Counter: ProtoType, Interface, Method
+	r.metrics.AccessCounter.WithLabelValues(ctx.ServiceTuple()).Inc()
 	// Select filters
 	selective := make([]flux.Filter, 0, 16)
 	for _, selector := range ext.FilterSelectors() {
@@ -146,7 +144,7 @@ func (r *Dispatcher) Route(ctx *flux.Context) *flux.ServeError {
 		defer func() {
 			ctx.AddMetric("transporter", time.Since(ctx.StartAt()))
 		}()
-		proto := ctx.Service().RpcProto()
+		proto := ctx.ServiceRpcProto()
 		transporter, ok := ext.TransporterByProto(proto)
 		if !ok {
 			logger.TraceContext(ctx).Errorw("SERVER:ROUTE:UNSUPPORTED_PROTOCOL",
@@ -165,7 +163,7 @@ func (r *Dispatcher) Route(ctx *flux.Context) *flux.ServeError {
 	}
 	// Walk filters
 	filters := append(ext.GlobalFilters(), selective...)
-	return doMetricEndpointFunc(r.walk(transport, filters)(ctx))
+	return doMetric(r.walk(transport, filters)(ctx))
 }
 
 func (r *Dispatcher) walk(next flux.FilterInvoker, filters []flux.Filter) flux.FilterInvoker {
