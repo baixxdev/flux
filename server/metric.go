@@ -6,9 +6,9 @@ import (
 )
 
 var (
-	defaultMetricNamespace = "flux"
-	defaultMetricSubsystem = "http"
-	defaultMetricBuckets   = []float64{
+	metricNamespace = "flux"
+	metricSubsystem = "endpoint"
+	metricBuckets   = []float64{
 		0.0005,
 		0.001, // 1ms
 		0.002,
@@ -29,32 +29,35 @@ var (
 	}
 )
 
-type Metrics struct {
-	EndpointAccess *prometheus.CounterVec
-	EndpointError  *prometheus.CounterVec
-	RouteDuration  *prometheus.HistogramVec
+type EndpointMetrics struct {
+	AccessCounter *prometheus.CounterVec
+	ErrorCounter  *prometheus.CounterVec
+	RouteDuration *prometheus.HistogramVec
 }
 
-func NewMetrics() *Metrics {
-	return &Metrics{
-		EndpointAccess: promauto.NewCounterVec(prometheus.CounterOpts{
-			Namespace: defaultMetricNamespace,
-			Subsystem: defaultMetricSubsystem,
-			Name:      "endpoint_access_total",
+func NewEndpointMetrics() *EndpointMetrics {
+	return &EndpointMetrics{
+		// Endpoint访问次数
+		AccessCounter: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Subsystem: metricSubsystem,
+			Name:      "access_total",
 			Help:      "Number of endpoint access",
 		}, []string{"ProtoName", "Interface", "Method"}),
-		EndpointError: promauto.NewCounterVec(prometheus.CounterOpts{
-			Namespace: defaultMetricNamespace,
-			Subsystem: defaultMetricSubsystem,
-			Name:      "endpoint_error_total",
+		// Endpoint访问错误统计
+		ErrorCounter: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Subsystem: metricSubsystem,
+			Name:      "error_total",
 			Help:      "Number of endpoint access errors",
 		}, []string{"ProtoName", "Interface", "Method", "ErrorCode"}),
+		// Endpoint访问耗时统计
 		RouteDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: defaultMetricNamespace,
-			Subsystem: defaultMetricSubsystem,
-			Name:      "endpoint_route_duration",
-			Help:      "Spend time by processing a endpoint",
-			Buckets:   defaultMetricBuckets,
+			Namespace: metricNamespace,
+			Subsystem: metricSubsystem,
+			Name:      "route_duration",
+			Help:      "Spend time by processing an endpoint",
+			Buckets:   metricBuckets,
 		}, []string{"ComponentType", "TypeId"}),
 	}
 }
