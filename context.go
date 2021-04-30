@@ -65,6 +65,16 @@ func (c *Context) ServiceID() string {
 	return c.endpoint.Service.ServiceID()
 }
 
+// ServiceRpcProto 返回Endpoint Service的RpcProto信息
+func (c *Context) ServiceRpcProto() string {
+	return c.endpoint.Service.RpcProto()
+}
+
+// ServiceTuple 返回Service的三元组信息
+func (c *Context) ServiceTuple() (proto, iface, method string) {
+	return c.endpoint.Service.RpcProto(), c.endpoint.Service.Interface, c.endpoint.Service.Method
+}
+
 // Attribute 获取指定key的Attribute。如果不存在，返回默认值；
 func (c *Context) Attribute(key string, defval interface{}) interface{} {
 	if v, ok := c.GetVariable(key); ok {
